@@ -1,0 +1,7 @@
+# edge_webapp_adapter/config.yaml
+INGEST_URL: "http://localhost:8080/api/v0/ingest/wire"
+API_KEY: ""
+NODE_ID: "NODE_IPHONE_01"
+ALERT_THRESHOLD: 0.80
+DEBOUNCE_MS: 5000
+LOG_LEVEL: "INFO"

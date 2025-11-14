@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Drone Classifier – ONNX Web (33D)</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 24px;
+      line-height: 1.4;
+    }
+
+    .card {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 16px 20px;
+      border: 1px solid #ddd;
+      border-radius: 16px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.06);
+    }
+
+    h1 {
+      font-size: 22px;
+      margin: 0 0 12px;
+    }
+
+    button {
+      font-size: 16px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .log {
+      white-space: pre-wrap;
+      background: #f8f8f8;
+      border-radius: 10px;
+      padding: 12px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 13px;
+      height: 180px;
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .prob {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid #ddd;
+      font-size: 12px;
+    }
+  </style>
+
+  <!-- ONNX Runtime UMD (defines global `ort`) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script>
+    // Force fresh JS each load during development to avoid iOS Safari caching
+    (function () {
+      var v = Date.now(); // simple cache-buster
+      var s = document.createElement('script');
+      s.src = 'app.legacy.js?v=' + v;
+      s.defer = true;
+      document.head.appendChild(s);
+    })();
+  </script>
+</head>
+
+<body>
+  <div class="card">
+    <h1>Drone Classifier (33-D) – iPhone Safari</h1>
+    <p class="muted">Audio stays on-device in this tab.</p>
+
+    <div class="row" style="margin: 12px 0;">
+      <button id="btnStart">Enable Microphone</button>
+      <button id="btnLoc">Enable Location</button>
+      <!-- Optional: WAV test input if mic/web-audio is blocked
+      <input id="wavFile" type="file" accept="audio/wav,audio/x-wav" />
+      -->
+      <span class="pill" id="status">idle</span>
+    </div>
+
+    <div class="muted">Model: <code>edge_artifacts/drone_33d_mlp.onnx</code></div>
+
+    <table id="probsTable" style="display:none;">
+      <thead>
+        <tr>
+          <th>Class</th>
+          <th>Probability</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Log</h3>
+    <div id="log" class="log"></div>
+  </div>
+</body>
+
+</html>

@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.cover
+*.py,cover
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+dist/
+build/
+.eggs/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# Env / secrets
+.env
+.env.*.local
+*.pem
+*.key
+
+# Node / web
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Streamlit cache
+.streamlit/
+
+# Logs
+logs/
+*.log
+
+# Optional: ignore large artifacts if you won’t LFS them
+edge_webapp_adapter/edge_artifacts/*.onnx
+edge_webapp_adapter/edge_artifacts/*.tflite
+
+ingest_api/store/events.db
+ingest_api/store/events.db-shm
+ingest_api/store/events.db-wal
