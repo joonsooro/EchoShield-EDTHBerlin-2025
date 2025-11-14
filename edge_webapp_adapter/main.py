@@ -1,3 +1,4 @@
+
 import logging
 import os
 from pathlib import Path
@@ -63,7 +64,8 @@ async def webhook_edge(req: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="invalid json")
 
-    wire = to_wirepacket(payload)
+    wire = to_wirepacket(payload, CFG)
+    # logger.info("Mapped wire sensor_node_id=%s", wire["sensor_node_id"])
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
@@ -80,3 +82,4 @@ async def webhook_edge(req: Request):
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/", StaticFiles(directory=str(Path(__file__).parent), html=True), name="web")
+

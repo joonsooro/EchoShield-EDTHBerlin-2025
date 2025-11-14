@@ -1,13 +1,16 @@
+
+
+
 import uuid
 from typing import Any, Dict
 
 SENSOR_TYPE = "acoustic"
 EVENT_CODE_MAP = {"drone": 10}
 
-def to_wirepacket(payload: Dict[str, Any]) -> Dict[str, Any]:
+def to_wirepacket(payload: Dict[str, Any], cfg) -> Dict[str, Any]:
     event_id = str(uuid.uuid4())
     ts_ns = int(payload.get("ts_ns") or int(float(payload["time_ms"])) * 1_000_000)
-    node = str(payload.get("nodeId") or payload.get("node_id") or "NODE_UNKNOWN")
+    node = str(payload.get("nodeId") or cfg.NODE_ID)
     bearing_deg = payload.get("azimuth_deg", None)
     conf = float(payload.get("confidence", 0.0))
     bearing_conf_pct = max(0, min(100, int(round(conf * 100))))
@@ -76,3 +79,6 @@ def to_wirepacket(payload: Dict[str, Any]) -> Dict[str, Any]:
         "location_method": "LOC_BEARING_ONLY",
         "packet_version": 1,
     }
+
+
+

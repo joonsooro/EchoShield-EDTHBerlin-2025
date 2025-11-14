@@ -25,6 +25,19 @@ window.addEventListener('error', function (e) {
   }
 })();
 
+function getNodeIdFromQuery(defaultId) {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var fromUrl = params.get("node");
+    if (fromUrl && fromUrl.trim().length > 0) {
+      return fromUrl.trim();
+    }
+  } catch (e) {
+    // ignore
+  }
+  return defaultId;
+}
+
 // ===== UI hooks =====
 var logEl = document.getElementById('log');
 var btn = document.getElementById('btnStart');
@@ -48,7 +61,9 @@ var DRONE_CLASS_NAME = "drone";
 var ALERT_THRESHOLD = 0.80;          // trigger at 80%
 var ALERT_COOLDOWN_MS = 5000;        // debounce: 5s between posts
 var WEBHOOK_URL = "/webhook/edge";   // same-origin; ngrok proxies to adapter
-var SENSOR_NODE_ID = "NODE_IPHONE_01";
+// var SENSOR_NODE_ID = "NODE_IPHONE_01";
+var SENSOR_NODE_ID = getNodeIdFromQuery("NODE_IPHONE_01");
+log("SENSOR_NODE_ID = " + SENSOR_NODE_ID);
 
 // Hysteresis state to avoid jitter spam
 var prevAbove = false;               // true if last state was above threshold
@@ -569,3 +584,6 @@ function updateTable(classes, probs) {
 if (location.protocol !== 'https:') {
   log('WARNING: Page is not served over HTTPS. iOS Safari may block mic or cross-origin requests.');
 }
+
+
+
