@@ -31,6 +31,12 @@ def to_canonical(wire: WirePacketIn, rx_ns: int) -> CanonicalEvent:
     bearing_conf = float(wire.bearing_confidence) / 100.0
 
     latency_ns = max(0, rx_ns - int(wire.ts_ns))
+
+    # Pass through GCC-PHAT metadata if available
+    gcc_phat_metadata = None
+    if wire.gcc_phat_metadata is not None:
+        gcc_phat_metadata = wire.gcc_phat_metadata.dict()
+
     return CanonicalEvent(
         event_id=wire.event_id,
         sensor_type=wire.sensor_type,  # normalized in validator
@@ -50,4 +56,5 @@ def to_canonical(wire: WirePacketIn, rx_ns: int) -> CanonicalEvent:
         sensor_node_id=wire.sensor_node_id,
         location_method=wire.location_method or "LOC_BEARING_ONLY",
         packet_version=wire.packet_version or 1,
+        gcc_phat_metadata=gcc_phat_metadata,
     )

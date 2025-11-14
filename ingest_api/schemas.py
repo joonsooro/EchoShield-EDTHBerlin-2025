@@ -13,6 +13,16 @@ class LocationInt(BaseModel):
     lon_int: int
     error_radius_m: int
 
+
+class GccPhatMetadata(BaseModel):
+    """GCC-PHAT bearing estimation metadata."""
+    method: str  # "GCC_PHAT_TDOA"
+    paired_node_id: str
+    baseline_distance_m: float
+    tdoa_sec: float  # Time difference of arrival in seconds
+    baseline_bearing_deg: float  # Bearing between node pair
+
+
 class WirePacketIn(BaseModel):
     event_id: str
     sensor_type: str  # keep string for wire, map to enum upstream
@@ -25,6 +35,7 @@ class WirePacketIn(BaseModel):
     event_code: int
     location_method: Optional[str] = None
     packet_version: Optional[int] = 1
+    gcc_phat_metadata: Optional[GccPhatMetadata] = None  # NEW: GCC-PHAT bearing data
 
     @validator("sensor_type")
     def validate_sensor_type(cls, v: str) -> str:
@@ -57,6 +68,9 @@ class CanonicalEvent(BaseModel):
     validity_status: Optional[Literal["valid", "invalid", "unknown"]] = "unknown"
     duplicate_flag: Optional[int] = 0
     object_track_id: Optional[str] = None
+
+    # GCC-PHAT bearing estimation metadata
+    gcc_phat_metadata: Optional[Dict[str, Any]] = None
 
     # (optional diagnostics)
     clock_skew_ns: Optional[int] = None

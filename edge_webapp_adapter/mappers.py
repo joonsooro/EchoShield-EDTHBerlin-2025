@@ -1,5 +1,8 @@
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from gcc_phat_bearing import estimate_bearing_multi_node
+from node_registry import get_registry
 
 SENSOR_TYPE = "acoustic"
 EVENT_CODE_MAP = {"drone": 10}
@@ -63,7 +66,60 @@ def to_wirepacket(payload: Dict[str, Any]) -> Dict[str, Any]:
     evt_name = str(payload.get("event", "drone")).lower()
     evt_code = EVENT_CODE_MAP.get(evt_name, 10)
 
-    return {
+    # Get node registry
+    registry = get_registry()
+
+    # Register/update this node's location if GPS available
+    if lat_f is not None and lon_f is not None:
+        registry.register_node(node, lat_f, lon_f, acc_f)
+        registry.add_detection(node, event_id, ts_ns, conf, lat_f, lon_f)
+
+    # Try to estimate bearing using GCC-PHAT with nearby nodes
+    gcc_phat_result = None
+    location_method = "LOC_BEARING_ONLY"
+
+    if lat_f is not None and lon_f is not None:
+        # Find nearby nodes within 100m radius
+        nearby_nodes = registry.get_nearby_nodes(node, max_radius_m=100.0)
+
+        if nearby_nodes:
+            # Get concurrent detections from nearby nodes
+            concurrent_detections = registry.find_concurrent_detections(
+                ts_ns,
+                time_window_ns=5_000_000_000,  # 5 seconds
+                min_confidence=0.5
+            )
+
+            # Add timestamp info to nearby nodes for TDOA calculation
+            for nearby in nearby_nodes:
+                nearby_id = nearby['node_id']
+                recent = registry.get_recent_detections(nearby_id, time_window_sec=5.0)
+                if recent:
+                    # Use most recent detection timestamp
+                    nearby['ts_ns'] = recent[-1]['ts_ns']
+
+            # Estimate bearing using GCC-PHAT
+            current_node_data = {
+                'node_id': node,
+                'lat': lat_f,
+                'lon': lon_f,
+                'ts_ns': ts_ns
+            }
+
+            gcc_phat_result = estimate_bearing_multi_node(
+                current_node_data,
+                nearby_nodes,
+                ts_ns
+            )
+
+            if gcc_phat_result:
+                # Use GCC-PHAT bearing instead of single-node bearing
+                bearing_deg = gcc_phat_result['bearing_deg']
+                bearing_conf_pct = int(round(gcc_phat_result['bearing_confidence'] * 100))
+                location_method = "LOC_ACOUSTIC_TRIANGULATION"
+
+    # Build WirePacket
+    wire_packet = {
         "event_id": event_id,
         "sensor_type": SENSOR_TYPE,
         "ts_ns": ts_ns,
@@ -73,6 +129,18 @@ def to_wirepacket(payload: Dict[str, Any]) -> Dict[str, Any]:
         "bearing_confidence": bearing_conf_pct,
         "n_objects_detected": 1,
         "event_code": evt_code,
-        "location_method": "LOC_BEARING_ONLY",
+        "location_method": location_method,
         "packet_version": 1,
     }
+
+    # Add GCC-PHAT metadata if available
+    if gcc_phat_result:
+        wire_packet["gcc_phat_metadata"] = {
+            "method": gcc_phat_result['method'],
+            "paired_node_id": gcc_phat_result['paired_node_id'],
+            "baseline_distance_m": round(gcc_phat_result['baseline_distance_m'], 2),
+            "tdoa_sec": round(gcc_phat_result['tdoa_sec'], 6),
+            "baseline_bearing_deg": round(gcc_phat_result['baseline_bearing_deg'], 2)
+        }
+
+    return wire_packet

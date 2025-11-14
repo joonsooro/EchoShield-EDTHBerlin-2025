@@ -94,4 +94,16 @@ async def ingest_wire(req: Request) -> JSONResponse:
     finally:
         conn.close()
 
-    return JSONResponse(status_code=202, content={"ok": True, "event_id": canonical.event_id})
+    # Build response with GCC-PHAT metadata if available
+    response_data = {
+        "ok": True,
+        "event_id": canonical.event_id,
+        "location_method": canonical.location_method,
+        "bearing_deg": canonical.bearing_deg,
+        "bearing_confidence": canonical.bearing_confidence
+    }
+
+    if canonical.gcc_phat_metadata:
+        response_data["gcc_phat"] = canonical.gcc_phat_metadata
+
+    return JSONResponse(status_code=202, content=response_data)

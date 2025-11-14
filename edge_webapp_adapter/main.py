@@ -31,6 +31,13 @@ def whoami_adapter():
 async def health():
     return {"status": "ok", "ingest_url": INGEST_URL}
 
+@app.get("/nodes/status")
+async def node_status():
+    """Get current node registry status."""
+    from node_registry import get_registry
+    registry = get_registry()
+    return registry.get_stats()
+
 @app.get("/geo-test", include_in_schema=False)
 def geo_test():
     html = """
