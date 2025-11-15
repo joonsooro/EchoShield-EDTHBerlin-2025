@@ -16,7 +16,7 @@ DEFAULT_DB = os.environ.get(
     "INGEST_DB",
     os.path.join(os.path.dirname(__file__), "..", "ingest_api", "store", "events.db"),
 )
-REFRESH_SECS = int(os.environ.get("UI_REFRESH_SECS", "5"))  # auto-refresh interval
+REFRESH_SECS = int(os.environ.get("UI_REFRESH_SECS", "2"))  # auto-refresh interval
 
 st.set_page_config(page_title="EchoShield UI (MVP)", layout="wide")
 
@@ -242,7 +242,8 @@ def node_health(df: pd.DataFrame, lookback_min: int = 5) -> pd.DataFrame:
     return last_rx.sort_values("age_sec", ascending=False)
 
 
-def render_map(df: pd.DataFrame, draw_corridor: bool = False, half_width_deg: float = 20.0, radius_m: float = 500.0):
+def render_map(df: pd.DataFrame, draw_corridor: bool = False, half_width_deg: float = 20.0, radius_m: float = 500.0, show_node_circles: bool = True,
+    show_drone_pins: bool = True):
     df_map = df.dropna(subset=["lat", "lon"]).copy()
     # Cast to float and drop meaningless (0,0) coords
     df_map["lat"] = df_map["lat"].astype(float)
@@ -251,13 +252,19 @@ def render_map(df: pd.DataFrame, draw_corridor: bool = False, half_width_deg: fl
     if df_map.empty:
         st.info("No geolocated events in the selected window.")
         return
-    c_lat = float(df_map["lat"].mean())
-    c_lon = float(df_map["lon"].mean())
+    # Center on the most recent event (by rx_ns if available, otherwise first row)
+    if "rx_ns" in df_map.columns:
+        latest = df_map.sort_values("rx_ns", ascending=False).iloc[0]
+    else:
+        latest = df_map.iloc[0]
+
+    c_lat = float(latest["lat"].mean())
+    c_lon = float(latest["lon"].mean())
 
     # HTTPS tile + attribution
     m = folium.Map(
         location=[c_lat, c_lon],
-        zoom_start=10,
+        zoom_start=16,
         tiles="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
         attr="&copy; OpenStreetMap contributors"
     )
@@ -274,8 +281,10 @@ def render_map(df: pd.DataFrame, draw_corridor: bool = False, half_width_deg: fl
             """,
             max_width=300,
         )
-        folium.CircleMarker(location=[lat, lon], radius=6).add_to(m)
-        folium.Marker([lat, lon], popup=popup).add_to(m)
+        if show_node_circles:
+            folium.CircleMarker(location=[lat, lon], radius=4).add_to(m)
+        if show_drone_pins:
+            folium.Marker([lat, lon], popup=popup).add_to(m)
 
         # Optional bearing corridor wedge (uses existing add_bearing_corridor)
         if draw_corridor and pd.notna(row.get("bearing_deg")):
@@ -297,13 +306,14 @@ def render_map(df: pd.DataFrame, draw_corridor: bool = False, half_width_deg: fl
 st.sidebar.title("EchoShield — Controls")
 db_path = st.sidebar.text_input("SQLite DB path", DEFAULT_DB)
 lookback = st.sidebar.slider("Lookback window (minutes)", 0, 240, 30, step=5)
-autorefresh = st.sidebar.checkbox(f"Auto-refresh every {REFRESH_SECS}s", value=True)
+# autorefresh = st.sidebar.checkbox(f"Auto-refresh every {REFRESH_SECS}s", value=True)
+autorefresh = True
 
-# --- Auto-refresh (version-agnostic) ---
-if autorefresh:
-    # Browser-level refresh every REFRESH_SECS seconds
-    st.markdown(f"<meta http-equiv='refresh' content='{REFRESH_SECS}'>", unsafe_allow_html=True)
-    st.caption(f"Auto-refresh every {REFRESH_SECS}s")
+# --- Auto-refresh (server-side, no JS/meta) ---
+# if autorefresh:
+#     st.caption(f"Auto-refresh every {REFRESH_SECS}s (server-side)")
+# else:
+#     st.caption("Auto-refresh disabled")
 
 # Use a changing 'seed' so @st.cache_data(ttl=0) invalidates each interval
 refresh_seed = int(time.time() // REFRESH_SECS) if autorefresh else int(time.time())
@@ -431,3 +441,11 @@ with tracks_tab:
         render_map(track_map_df)
     else:
         st.info("No active tracks available for mapping yet.")
+
+# --- Server-side auto-refresh loop ---
+if autorefresh:
+    # Block this session for REFRESH_SECS, then rerun.
+    # When the checkbox is turned off, this block is skipped on the next run,
+    # so auto-refresh stops cleanly.
+    time.sleep(REFRESH_SECS)
+    st.rerun()
