@@ -8,12 +8,17 @@ Complete Acoustic Drone Detection Pipeline
 This script integrates all refactored modules into a complete end-to-end
 drone detection system. It processes audio files through:
 
-1. Audio loading and preprocessing
+1. Audio loading and preprocessing (mono or stereo)
 2. Framing and windowing
-3. FFT analysis
-4. Harmonic filtering (optional)
-5. Multi-evidence detection (SNR + Harmonic + Temporal)
-6. Results visualization and export
+3. GCC-PHAT Direction of Arrival estimation (stereo only)
+4. FFT analysis
+5. Harmonic filtering (optional)
+6. Multi-evidence detection (SNR + Harmonic + Temporal)
+7. Results visualization and export
+
+For stereo audio, the system automatically estimates the drone's direction
+using GCC-PHAT algorithm. Ensure correct microphone spacing is specified
+via --mic-spacing for accurate angle estimation.
 
 Data Structure Expected:
 -----------------------
@@ -29,8 +34,11 @@ data/
 
 Usage Examples:
 --------------
-# Process single file
+# Process single file (mono or stereo)
 python main_drone_detector.py --file data/train/drone/0055b2bb.wav
+
+# Process stereo file with custom microphone spacing (8 cm laptop mics)
+python main_drone_detector.py --file audio_stereo.wav --mic-spacing 0.08
 
 # Process entire directory
 python main_drone_detector.py --dir data/train/drone
@@ -43,6 +51,12 @@ python main_drone_detector.py --batch --split train --output results/train_resul
 
 # With visualization
 python main_drone_detector.py --file data/train/drone/0055b2bb.wav --visualize --save-plots results/
+
+# Stereo file with DOA estimation (uses default 14 cm spacing)
+python main_drone_detector.py --file stereo_recording.wav --visualize
+
+# Stereo file with custom mic spacing (20 cm array)
+python main_drone_detector.py --file stereo_recording.wav --mic-spacing 0.20 --visualize
 """
 
 import os
@@ -126,6 +140,13 @@ class DetectorConfig:
     temporal_window: int = 5
     confidence_threshold: float = 0.75
 
+    # Stereo/DOA parameters
+    mic_spacing_m: float = 0.14         # Microphone spacing in meters (14 cm default)
+                                        # Typical values:
+                                        # - Laptop/phone stereo: 0.05-0.10 m (5-10 cm)
+                                        # - Standalone stereo mics: 0.10-0.30 m (10-30 cm)
+                                        # - Custom arrays: measure actual spacing
+
     # Output control
     verbose: bool = True
 
@@ -134,7 +155,7 @@ class DetectorConfig:
 # Audio Loading
 # ============================================================================
 
-def load_audio(file_path: str, target_fs: Optional[int] = None) -> Tuple[np.ndarray, int]:
+def load_audio(file_path: str, target_fs: Optional[int] = None) -> Tuple[np.ndarray, int, bool]:
     """
     Load audio file and optionally resample.
 
@@ -148,9 +169,11 @@ def load_audio(file_path: str, target_fs: Optional[int] = None) -> Tuple[np.ndar
     Returns
     -------
     audio : np.ndarray
-        Audio signal (mono)
+        Audio signal (mono: [samples] or stereo: [samples, 2])
     fs : int
         Sampling rate [Hz]
+    is_stereo : bool
+        True if audio is stereo, False if mono
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Audio file not found: {file_path}")
@@ -168,9 +191,19 @@ def load_audio(file_path: str, target_fs: Optional[int] = None) -> Tuple[np.ndar
     else:  # soundfile
         audio, fs = sf.read(file_path)
 
-    # Convert stereo to mono if needed
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
+    # Keep stereo if available (for GCC-PHAT angle estimation)
+    # audio.ndim == 1: mono [samples]
+    # audio.ndim == 2: stereo [samples, channels]
+    is_stereo = (audio.ndim > 1)
+
+    if not is_stereo:
+        # Mono audio - keep as is
+        pass
+    else:
+        # Stereo audio - keep both channels
+        # Ensure shape is [samples, channels]
+        if audio.shape[0] < audio.shape[1]:
+            audio = audio.T
 
     # Resample if needed
     if target_fs is not None and fs != target_fs:
@@ -186,7 +219,7 @@ def load_audio(file_path: str, target_fs: Optional[int] = None) -> Tuple[np.ndar
                 UserWarning
             )
 
-    return audio, fs
+    return audio, fs, is_stereo
 
 
 # ============================================================================
@@ -235,6 +268,65 @@ def estimate_fundamental_frequency(
     return f0
 
 
+def frame_and_window_multichannel(
+    audio: np.ndarray,
+    fs: float,
+    frame_length_ms: float = 64.0,
+    hop_length_ms: float = 32.0,
+    window_type: str = 'hann'
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Frame and window multi-channel audio for stereo processing.
+
+    Parameters
+    ----------
+    audio : np.ndarray
+        Multi-channel audio [samples, n_channels]
+    fs : float
+        Sampling rate [Hz]
+    frame_length_ms : float
+        Frame length in milliseconds
+    hop_length_ms : float
+        Hop length in milliseconds
+    window_type : str
+        Window type ('hann', 'hamming', etc.)
+
+    Returns
+    -------
+    frames : np.ndarray
+        Framed audio [n_frames, frame_length, n_channels]
+    frame_times : np.ndarray
+        Frame center times [seconds]
+    """
+    from framing_windowing import get_window
+
+    n_samples, n_channels = audio.shape
+    frame_length = int(round(fs * frame_length_ms / 1000.0))
+    hop_length = int(round(fs * hop_length_ms / 1000.0))
+
+    # Calculate number of frames
+    n_frames = 1 + (n_samples - frame_length) // hop_length
+
+    # Pre-allocate
+    frames = np.zeros((n_frames, frame_length, n_channels), dtype=np.float64)
+
+    # Extract frames for each channel
+    for i in range(n_frames):
+        start_idx = i * hop_length
+        end_idx = start_idx + frame_length
+        frames[i, :, :] = audio[start_idx:end_idx, :]
+
+    # Apply window
+    window = get_window(window_type, frame_length)
+    # Broadcast: [n_frames, frame_length, n_channels] * [frame_length, 1]
+    frames = frames * window[None, :, None]
+
+    # Calculate frame times
+    frame_times = (np.arange(n_frames) * hop_length + frame_length / 2.0) / fs
+
+    return frames, frame_times
+
+
 def process_audio_file(
     file_path: str,
     config: DetectorConfig
@@ -264,36 +356,96 @@ def process_audio_file(
         print(f"Processing: {os.path.basename(file_path)}")
         print(f"{'='*70}")
 
-    audio, fs = load_audio(file_path, target_fs=config.target_fs)
+    audio, fs, is_stereo = load_audio(file_path, target_fs=config.target_fs)
 
     # Trim to max duration if specified
     if config.max_duration is not None:
         max_samples = int(config.max_duration * fs)
-        audio = audio[:max_samples]
+        if is_stereo:
+            audio = audio[:max_samples, :]
+        else:
+            audio = audio[:max_samples]
 
-    duration = len(audio) / fs
+    duration = len(audio) / fs if not is_stereo else audio.shape[0] / fs
+    n_channels = 2 if is_stereo else 1
 
     if config.verbose:
         print(f"\n[1/6] Audio loaded:")
         print(f"  Sampling rate: {fs} Hz")
+        print(f"  Channels: {'Stereo (2)' if is_stereo else 'Mono (1)'}")
         print(f"  Duration: {duration:.2f} seconds")
-        print(f"  Samples: {len(audio)}")
+        print(f"  Samples: {len(audio) if not is_stereo else audio.shape[0]}")
 
     # ========================================================================
     # Step 2: Framing and windowing
     # ========================================================================
-    frames, frame_times = frame_and_window(
-        audio, fs,
-        frame_length_ms=config.frame_length_ms,
-        hop_length_ms=config.hop_length_ms,
-        window_type=config.window_type
-    )
+    doa_angles = None  # Will store DOA estimates if stereo
 
-    if config.verbose:
-        print(f"\n[2/6] Framing completed:")
-        print(f"  Frames: {frames.shape[0]}")
-        print(f"  Samples per frame: {frames.shape[1]}")
-        print(f"  Overlap: {(1 - config.hop_length_ms/config.frame_length_ms)*100:.0f}%")
+    if is_stereo:
+        # Multi-channel framing for stereo
+        frames_multichannel, frame_times = frame_and_window_multichannel(
+            audio, fs,
+            frame_length_ms=config.frame_length_ms,
+            hop_length_ms=config.hop_length_ms,
+            window_type=config.window_type
+        )
+
+        if config.verbose:
+            print(f"\n[2/6] Framing completed (stereo):")
+            print(f"  Frames: {frames_multichannel.shape[0]}")
+            print(f"  Samples per frame: {frames_multichannel.shape[1]}")
+            print(f"  Channels: {frames_multichannel.shape[2]}")
+            print(f"  Overlap: {(1 - config.hop_length_ms/config.frame_length_ms)*100:.0f}%")
+
+        # Perform GCC-PHAT for angle estimation
+        try:
+            from gcc_phat_doa import estimate_doa_gcc_phat
+
+            # Use configured microphone spacing
+            mic_spacing = config.mic_spacing_m
+
+            if config.verbose:
+                print(f"\n[2b/6] GCC-PHAT DOA estimation:")
+                print(f"  Microphone spacing: {mic_spacing*100:.1f} cm ({mic_spacing:.3f} m)")
+                print(f"  NOTE: Ensure mic_spacing_m is set correctly for accurate angle estimation!")
+
+            doa_angles, tdoa_series = estimate_doa_gcc_phat(
+                frames_multichannel, fs, mic_spacing,
+                ref_channel=0,
+                c=343.0,
+                interp=16,
+                robust_averaging=True
+            )
+
+            # Convert to degrees for readability
+            doa_degrees = np.degrees(doa_angles)
+
+            if config.verbose:
+                print(f"  Mean angle: {doa_degrees.mean():.1f}°")
+                print(f"  Angle std: {doa_degrees.std():.1f}°")
+                print(f"  Angle range: [{doa_degrees.min():.1f}°, {doa_degrees.max():.1f}°]")
+        except Exception as e:
+            if config.verbose:
+                print(f"\n[2b/6] GCC-PHAT failed: {e}. Continuing without angle estimation.")
+            doa_angles = None
+
+        # For detection, use one channel (or average both)
+        # Let's average both channels after framing
+        frames = np.mean(frames_multichannel, axis=2)  # [n_frames, frame_length]
+    else:
+        # Mono framing
+        frames, frame_times = frame_and_window(
+            audio, fs,
+            frame_length_ms=config.frame_length_ms,
+            hop_length_ms=config.hop_length_ms,
+            window_type=config.window_type
+        )
+
+        if config.verbose:
+            print(f"\n[2/6] Framing completed (mono):")
+            print(f"  Frames: {frames.shape[0]}")
+            print(f"  Samples per frame: {frames.shape[1]}")
+            print(f"  Overlap: {(1 - config.hop_length_ms/config.frame_length_ms)*100:.0f}%")
 
     # ========================================================================
     # Step 3: FFT analysis
@@ -426,6 +578,10 @@ def process_audio_file(
         print(f"\n[6/6] Summary:")
         print(f"  Overall Decision: {'DRONE DETECTED' if overall_detected else 'NO DRONE'}")
         print(f"  Confidence: {mean_confidence:.3f} (±{std_confidence:.3f})")
+        if doa_angles is not None:
+            doa_deg = np.degrees(doa_angles)
+            print(f"  Direction of Arrival: {doa_deg.mean():.1f}° (±{doa_deg.std():.1f}°)")
+            print(f"  Microphone Spacing Used: {config.mic_spacing_m*100:.1f} cm ({config.mic_spacing_m:.3f} m)")
         print(f"  Processing time: {processing_time:.2f} seconds")
 
     # ========================================================================
@@ -437,6 +593,8 @@ def process_audio_file(
         'file_name': os.path.basename(file_path),
         'duration_sec': duration,
         'sampling_rate': fs,
+        'is_stereo': is_stereo,
+        'n_channels': n_channels,
 
         # Detection results
         'overall_detected': overall_detected,
@@ -458,6 +616,12 @@ def process_audio_file(
         'mean_valid_harmonics': mean_valid_harmonics,
         'estimated_f0': f0_estimated,
         'snr_improvement_db': snr_improvement,
+
+        # DOA metrics (stereo only)
+        'doa_angles': doa_angles if doa_angles is not None else None,
+        'mean_doa_deg': np.degrees(doa_angles).mean() if doa_angles is not None else None,
+        'std_doa_deg': np.degrees(doa_angles).std() if doa_angles is not None else None,
+        'mic_spacing_m': config.mic_spacing_m if is_stereo else None,
 
         # Processing
         'processing_time_sec': processing_time,
@@ -494,7 +658,11 @@ def plot_detection_results(results: Dict, save_path: Optional[str] = None):
     save_path : str, optional
         Path to save plot (if None, displays interactively)
     """
-    fig, axes = plt.subplots(4, 1, figsize=(14, 12))
+    # Check if DOA angles are available (stereo recording)
+    has_doa = results.get('doa_angles') is not None
+    n_plots = 5 if has_doa else 4
+
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 15 if has_doa else 12))
 
     file_name = results['file_name']
     frame_times = results['frame_times']
@@ -562,35 +730,65 @@ def plot_detection_results(results: Dict, save_path: Optional[str] = None):
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
 
-    # Plot 4: Detection timeline
-    axes[3].plot(frame_times, confidences, linewidth=2,
+    # Plot 4: DOA angles (if stereo)
+    plot_idx = 3
+    if has_doa:
+        doa_angles = results['doa_angles']
+        doa_degrees = np.degrees(doa_angles)
+        mic_spacing = results.get('mic_spacing_m', 0.14)
+
+        axes[3].plot(frame_times, doa_degrees, linewidth=2, color='purple', alpha=0.8)
+        axes[3].axhline(0, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+        axes[3].fill_between(frame_times, doa_degrees - 5, doa_degrees + 5,
+                            color='purple', alpha=0.2, label='±5° range')
+
+        axes[3].set_title(f'Direction of Arrival (DOA) - Mic Spacing: {mic_spacing*100:.1f} cm',
+                         fontweight='bold', fontsize=12)
+        axes[3].set_xlabel('Time (s)')
+        axes[3].set_ylabel('Angle (degrees)')
+        axes[3].set_ylim([-95, 95])
+        axes[3].grid(True, alpha=0.3)
+
+        # Add angle interpretation
+        mean_angle = doa_degrees.mean()
+        std_angle = doa_degrees.std()
+        axes[3].text(0.02, 0.95, f'Mean: {mean_angle:.1f}° (±{std_angle:.1f}°)',
+                    transform=axes[3].transAxes,
+                    fontsize=11, fontweight='bold', color='purple',
+                    verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        plot_idx = 4
+
+    # Plot 5 (or 4): Detection timeline
+    axes[plot_idx].plot(frame_times, confidences, linewidth=2,
                 label='Confidence', color='blue')
 
     # Mark detections
     if np.any(detections):
         detection_times = frame_times[detections]
         detection_confs = confidences[detections]
-        axes[3].scatter(detection_times, detection_confs,
+        axes[plot_idx].scatter(detection_times, detection_confs,
                        color='red', s=50, label='Detection', zorder=3)
 
-    axes[3].axhline(0.75, color='orange', linestyle='--',
+    axes[plot_idx].axhline(0.75, color='orange', linestyle='--',
                    linewidth=2, label='Threshold')
 
     # Overall decision annotation
     decision_text = 'DRONE DETECTED' if results['overall_detected'] else 'NO DRONE'
     decision_color = 'red' if results['overall_detected'] else 'green'
-    axes[3].text(0.02, 0.95, decision_text,
-                transform=axes[3].transAxes,
+    axes[plot_idx].text(0.02, 0.95, decision_text,
+                transform=axes[plot_idx].transAxes,
                 fontsize=14, fontweight='bold', color=decision_color,
                 verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-    axes[3].set_title('Detection Timeline', fontweight='bold', fontsize=12)
-    axes[3].set_xlabel('Time (s)')
-    axes[3].set_ylabel('Confidence')
-    axes[3].legend(loc='upper right')
-    axes[3].grid(True, alpha=0.3)
-    axes[3].set_ylim([-0.05, 1.05])
+    axes[plot_idx].set_title('Detection Timeline', fontweight='bold', fontsize=12)
+    axes[plot_idx].set_xlabel('Time (s)')
+    axes[plot_idx].set_ylabel('Confidence')
+    axes[plot_idx].legend(loc='upper right')
+    axes[plot_idx].grid(True, alpha=0.3)
+    axes[plot_idx].set_ylim([-0.05, 1.05])
 
     plt.tight_layout()
 
@@ -762,6 +960,11 @@ def main():
     parser.add_argument('--use-filter', action='store_true',
                        help='Enable harmonic filtering')
 
+    # Stereo/DOA parameters
+    parser.add_argument('--mic-spacing', type=float, default=0.14,
+                       help='Microphone spacing in meters for stereo DOA estimation (default: 0.14 m / 14 cm). '
+                            'Examples: laptop mics ~0.08 m, standalone stereo ~0.14 m')
+
     # Other options
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress verbose output')
@@ -773,6 +976,7 @@ def main():
         detector_f0=args.f0,
         confidence_threshold=args.threshold,
         use_harmonic_filter=args.use_filter,
+        mic_spacing_m=args.mic_spacing,
         verbose=not args.quiet
     )
 

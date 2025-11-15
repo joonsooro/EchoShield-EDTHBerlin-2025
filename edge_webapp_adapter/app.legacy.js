@@ -51,6 +51,10 @@ function log(msg) {
     logEl.textContent += "[" + time + "] " + msg + "\n";
     logEl.scrollTop = logEl.scrollHeight;
   }
+  // Also mirror to console for desktop debugging
+  try {
+    console.log("[" + time + "] " + msg);
+  } catch (_) { }
 }
 function setStatus(s) { if (statusPill) statusPill.textContent = s; }
 
@@ -364,8 +368,20 @@ document.addEventListener('DOMContentLoaded', function () {
     } else {
       log('btnLoc not found in DOM');
     }
+
+    // 🔹 Link the debug button
+    var btnDebug = document.getElementById('btnDebug');
+    if (btnDebug) {
+      btnDebug.addEventListener('click', function () {
+        log('Debug Audio Channels clicked');
+        debugAudioChannels();
+      });
+    } else {
+      log('btnDebug not found in DOM');
+    }
+
   } catch (e) {
-    log('btnLoc handler attach error: ' + e.message);
+    log('DOM listener attach error: ' + e.message);
   }
 });
 
@@ -460,6 +476,74 @@ async function startMic() {
 
   // periodic inference
   setInterval(function () { runInference(ring, idx, SR_CTX); }, Math.round(WIN_SEC * 1000));
+}
+
+// Get Channel numbers from the web app
+async function debugAudioChannels() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    console.log("[AudioDebug] getUserMedia not supported");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: { ideal: 2, min: 1 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+
+    const tracks = stream.getAudioTracks();
+    if (!tracks.length) {
+      log("[AudioDebug] No audio tracks");
+      return;
+    }
+
+    const track = tracks[0];
+    var settings = track.getSettings && track.getSettings();
+    log("[AudioDebug] track settings: " + JSON.stringify(settings || {}));
+    var constraints = track.getConstraints && track.getConstraints();
+    log("[AudioDebug] track constraints: " + JSON.stringify(constraints || {}));
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    const source = ctx.createMediaStreamSource(stream);
+
+    log("[AudioDebug] source.channelCount: " + source.channelCount);
+    log("[AudioDebug] ctx.destination.maxChannelCount: " + ctx.destination.maxChannelCount);
+
+    // See if there are 2 channels using channle splitter
+    const splitter = ctx.createChannelSplitter(2);
+    source.connect(splitter);
+
+    // L/R buffer extraction trial
+    const frameSize = 1024;
+    const scriptNode = ctx.createScriptProcessor(frameSize, 2, 2);
+    splitter.connect(scriptNode);
+    scriptNode.connect(ctx.destination);
+
+    scriptNode.onaudioprocess = (event) => {
+      const ch0 = event.inputBuffer.getChannelData(0);
+      const ch1 = event.inputBuffer.numberOfChannels > 1
+        ? event.inputBuffer.getChannelData(1)
+        : null;
+
+      log("[AudioDebug] frame channels: ch0 len=" + ch0.length +
+        " ch1 len=" + (ch1 ? ch1.length : "NONE") +
+        " numChannels=" + event.inputBuffer.numberOfChannels);
+
+      // One time output
+      scriptNode.disconnect();
+      splitter.disconnect();
+      stream.getTracks().forEach(t => t.stop());
+      ctx.close();
+    };
+
+  } catch (err) {
+    log("[AudioDebug] error: " + (err && err.name ? err.name : "") + " " + (err && err.message ? err.message : ""));
+  }
 }
 
 async function runInference(ring, idx, SR_CTX) {
