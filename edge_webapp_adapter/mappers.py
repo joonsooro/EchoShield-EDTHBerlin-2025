@@ -9,7 +9,11 @@ EVENT_CODE_MAP = {"drone": 10}
 
 def to_wirepacket(payload: Dict[str, Any], cfg) -> Dict[str, Any]:
     event_id = str(uuid.uuid4())
-    ts_ns = int(payload.get("ts_ns") or int(float(payload["time_ms"])) * 1_000_000)
+    time_ms = payload.get("time_ms")
+    if time_ms is not None:
+        ts_ns = int(float(time_ms) * 1_000_000)
+    else:
+        ts_ns = int(payload.get("ts_ns", 0))
     node = str(payload.get("nodeId") or cfg.NODE_ID)
     bearing_deg = payload.get("azimuth_deg", None)
     conf = float(payload.get("confidence", 0.0))

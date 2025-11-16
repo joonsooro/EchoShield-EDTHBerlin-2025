@@ -94,6 +94,19 @@
 
   <!-- ONNX Runtime UMD (defines global `ort`) -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+  <!-- Remove this line
+<script type="module" src="src/audio/bearing/estimator.js"></script>
+-->
+
+  <!-- Bearing pipeline (classic scripts, no modules) -->
+  <script src="src/audio/bearing/types.js?v=1"></script>
+  <script src="src/audio/bearing/framingWindowing.js?v=1"></script>
+  <script src="src/audio/bearing/fft.js?v=1"></script>
+  <script src="src/audio/bearing/gccPhatDoa.js?v=1"></script>
+  <script src="src/audio/bearing/bearingTransform.js?v=1"></script>
+  <script src="src/audio/bearing/estimator.js?v=1"></script>
+
   <script>
     // Force fresh JS each load during development to avoid iOS Safari caching
     (function () {
@@ -104,6 +117,56 @@
       document.head.appendChild(s);
     })();
   </script>
+
+  <!-- Bearing pipeline ES module for testing -->
+  <!-- <script type="module" src="./src/audio/bearing/testBearing.js"></script> -->
+  <!-- Bearing pipeline FFT testing -->
+  <!-- <script type="module" src="./src/audio/bearing/testFft.js"></script> -->
+  <!-- Bearing pipeline GccPHAT/O(N^2) slow, accurate testing -->
+  <!-- <script type="module" src="./src/audio/bearing/testGcc.js"></script> -->
+
+  <script>
+    (function () {
+      // Default heading (deg) if nothing is specified
+      var heading = 0;
+
+      try {
+        var params = new URLSearchParams(window.location.search);
+
+        // 1) Highest priority: explicit heading_deg query param
+        if (params.has("heading_deg")) {
+          var h = parseFloat(params.get("heading_deg"));
+          if (!Number.isNaN(h)) {
+            heading = h;
+          }
+        } else if (params.has("heading")) {
+          // fallback alias: ?heading=...
+          var h2 = parseFloat(params.get("heading"));
+          if (!Number.isNaN(h2)) {
+            heading = h2;
+          }
+        } else if (params.has("node")) {
+          // 2) Fallback: map node name -> heading
+          var node = params.get("node");
+          var NODE_HEADING_MAP = {
+            "NODE_ALPHA": 0,    // TODO: adjust to your real compass headings
+            "NODE_BRAVO": 0
+          };
+
+          if (Object.prototype.hasOwnProperty.call(NODE_HEADING_MAP, node)) {
+            heading = NODE_HEADING_MAP[node];
+          }
+        }
+      } catch (e) {
+        console.warn("[EchoShield] Failed to parse heading from URL:", e);
+      }
+
+      // Expose globally so app.legacy.js / bearing estimator can consume it
+      window.NODE_HEADING_DEG = heading;
+      console.log("[EchoShield] NODE_HEADING_DEG =", window.NODE_HEADING_DEG);
+    })();
+  </script>
+
 </head>
 
 <body>

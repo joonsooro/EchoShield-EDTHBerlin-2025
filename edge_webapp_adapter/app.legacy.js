@@ -60,14 +60,48 @@ function setStatus(s) { if (statusPill) statusPill.textContent = s; }
 
 log("App legacy loaded");
 
+// Smoke test: did the bearing module run?
+try {
+  if (window._bearingEstimatorLoaded) {
+    log("[Smoke] Bearing estimator ES module loaded (window._bearingEstimatorLoaded = true)");
+  } else {
+    log("[Smoke] Bearing estimator module NOT loaded");
+  }
+} catch (e) {
+  log("[Smoke] Bearing estimator flag check failed: " + e.message);
+}
+
 // ==== Alert POST config (ADD) ====
 var DRONE_CLASS_NAME = "drone";
 var ALERT_THRESHOLD = 0.80;          // trigger at 80%
 var ALERT_COOLDOWN_MS = 5000;        // debounce: 5s between posts
 var WEBHOOK_URL = "/webhook/edge";   // same-origin; ngrok proxies to adapter
 // var SENSOR_NODE_ID = "NODE_IPHONE_01";
+
 var SENSOR_NODE_ID = getNodeIdFromQuery("NODE_IPHONE_01");
 log("SENSOR_NODE_ID = " + SENSOR_NODE_ID);
+
+// --- Bearing estimation state (stereo DOA on device) ---
+var bearingBuffer = [];            // rolling [ [ch0,ch1], ... ]
+var bearingState = null;           // estimator state (smoothing etc.)
+var lastBearingDeg = null;         // latest bearing estimate (deg)
+var lastBearingConf = 0.0;         // latest confidence 0..1
+
+// window lengths (seconds)
+var BEARING_CHUNK_SEC = 0.5;       // size of chunk passed to estimator
+var BEARING_MAX_SEC = 3.0;         // max history kept in buffer
+
+// derived once we know AudioContext sampleRate
+var bearingNsamplesTarget = 0;
+var bearingMaxSamples = 0;
+
+// heading_deg for this node: prefer server-exposed global, fall back to 0
+var NODE_HEADING_DEG =
+  (typeof window !== "undefined" && window.NODE_HEADING_DEG != null)
+    ? Number(window.NODE_HEADING_DEG)
+    : 0;
+
+log("NODE_HEADING_DEG = " + NODE_HEADING_DEG);
 
 // Hysteresis state to avoid jitter spam
 var prevAbove = false;               // true if last state was above threshold
@@ -81,6 +115,7 @@ var lastLon = null;
 var lastAcc = null; // meters
 
 var geoWatchId = null;
+var geoHasLoggedUpdate = false;  // suppress repeated geo update logs
 
 // --- Geolocation diagnostics ---
 function geoDiagLog(context) {
@@ -139,7 +174,10 @@ function startGeoWatch() {
             lastLat = (typeof c2.latitude === "number") ? c2.latitude : null;
             lastLon = (typeof c2.longitude === "number") ? c2.longitude : null;
             lastAcc = (typeof c2.accuracy === "number") ? c2.accuracy : null;
-            log("Geo update lat=" + lastLat + " lon=" + lastLon + " acc_m=" + lastAcc);
+            // if (!geoHasLoggedUpdate) {
+            //   log("Geo update lat=" + lastLat + " lon=" + lastLon + " acc_m=" + lastAcc);
+            //   geoHasLoggedUpdate = true;
+            // }
           },
           function (err2) {
             log("Geo watch error: " + err2.message);
@@ -158,7 +196,10 @@ function startGeoWatch() {
               lastLat = (typeof c2.latitude === "number") ? c2.latitude : null;
               lastLon = (typeof c2.longitude === "number") ? c2.longitude : null;
               lastAcc = (typeof c2.accuracy === "number") ? c2.accuracy : null;
-              log("Geo update lat=" + lastLat + " lon=" + lastLon + " acc_m=" + lastAcc);
+              // if (!geoHasLoggedUpdate) {
+              //   log("Geo update lat=" + lastLat + " lon=" + lastLon + " acc_m=" + lastAcc);
+              //   geoHasLoggedUpdate = true;
+              // }
             },
             function (err2) {
               log("Geo watch error: " + err2.message);
@@ -201,7 +242,10 @@ function requestGeoOnceThenWatch() {
           lastLat = (typeof c2.latitude === 'number') ? c2.latitude : null;
           lastLon = (typeof c2.longitude === 'number') ? c2.longitude : null;
           lastAcc = (typeof c2.accuracy === 'number') ? c2.accuracy : null;
-          log('Geo update (direct path) lat=' + lastLat + ' lon=' + lastLon + ' acc_m=' + lastAcc);
+          // if (!geoHasLoggedUpdate) {
+          //   log('Geo update (direct path) lat=' + lastLat + ' lon=' + lastLon + ' acc_m=' + lastAcc);
+          //   geoHasLoggedUpdate = true;
+          // }
         },
         function (err2) {
           log('Geo watch error (direct path): ' + err2.message + ' code=' + err2.code);
@@ -405,6 +449,8 @@ async function postAlert(probDrone, bearingDeg) {
     acc_m: (lastAcc !== null ? lastAcc : null)
   };
 
+  log("Alert payload (JS) = " + JSON.stringify(body));
+
   try {
     log("POST alert → " + WEBHOOK_URL);
     var res = await fetch(WEBHOOK_URL, {
@@ -434,7 +480,14 @@ async function startMic() {
   setStatus('requesting mic…');
   var stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: { ideal: 2, min: 1 },  // prefer stereo, allow mono fallback
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
     log('Microphone permission granted');
   } catch (err) {
     setStatus('mic blocked');
@@ -461,12 +514,37 @@ async function startMic() {
   var ring = new Float32Array(N_SAMPLES_CTX);
   var idx = 0;
 
-  // capture
+  // Bearing buffer sizing (based on actual AudioContext rate)
+  bearingNsamplesTarget = Math.round(SR_CTX * BEARING_CHUNK_SEC);
+  bearingMaxSamples = Math.round(SR_CTX * BEARING_MAX_SEC);
+  log("Bearing config: chunk=" + bearingNsamplesTarget + " samples, max=" + bearingMaxSamples + " samples");
+
+  // capture (stereo in, mono ring for classifier)
   var workSize = 2048;
-  processor = audioCtx.createScriptProcessor(workSize, 1, 1);
+  processor = audioCtx.createScriptProcessor(workSize, 2, 2);
   processor.onaudioprocess = function (e) {
-    var d = e.inputBuffer.getChannelData(0);
-    for (var i = 0; i < d.length; i++) { ring[idx] = d[i]; idx = (idx + 1) % N_SAMPLES_CTX; }
+    var inputBuf = e.inputBuffer;
+    var numChannels = inputBuf.numberOfChannels || 1;
+    var ch0 = inputBuf.getChannelData(0);
+    var ch1 = (numChannels > 1) ? inputBuf.getChannelData(1) : ch0; // mono fallback
+
+    var len = ch0.length;
+    for (var i = 0; i < len; i++) {
+      // existing mono ring for the MLP classifier
+      ring[idx] = ch0[i];
+      idx = (idx + 1) % N_SAMPLES_CTX;
+
+      // stereo samples for bearing estimator
+      bearingBuffer.push([ch0[i], ch1[i]]);
+    }
+
+    // keep only the last BEARING_MAX_SEC of samples
+    if (bearingMaxSamples > 0 && bearingBuffer.length > bearingMaxSamples) {
+      bearingBuffer = bearingBuffer.slice(bearingBuffer.length - bearingMaxSamples);
+    }
+
+    // try bearing estimation on the latest window
+    maybeComputeBearing(SR_CTX);
   };
 
   src.connect(processor);
@@ -476,6 +554,59 @@ async function startMic() {
 
   // periodic inference
   setInterval(function () { runInference(ring, idx, SR_CTX); }, Math.round(WIN_SEC * 1000));
+}
+
+// Bearing estimation wrapper (called from audio callback)
+function maybeComputeBearing(fs) {
+  try {
+    if (typeof window === "undefined" || typeof window.estimateBearing !== "function") {
+      return; // estimator.js not loaded yet
+    }
+  } catch (_) {
+    return;
+  }
+
+  if (!bearingBuffer || bearingBuffer.length === 0 || bearingNsamplesTarget <= 0) return;
+  if (bearingBuffer.length < bearingNsamplesTarget) return;
+
+  // Take the last BEARING_CHUNK_SEC of stereo samples
+  var startIdx = bearingBuffer.length - bearingNsamplesTarget;
+  if (startIdx < 0) startIdx = 0;
+  var chunk = bearingBuffer.slice(startIdx); // [nSamples][2]
+
+  var micGeometry = {
+    mic_spacing_m: 0.15,        // TODO: tune effective iPhone spacing
+    heading_deg: NODE_HEADING_DEG
+  };
+
+  log(
+    "[Bearing] micGeometry.heading_deg=" +
+    micGeometry.heading_deg +
+    " (NODE_HEADING_DEG=" +
+    NODE_HEADING_DEG +
+    ")"
+  );
+
+  try {
+    var res = window.estimateBearing(chunk, fs, micGeometry, bearingState);
+    if (!res) {
+      log("[Bearing] estimator returned null/undefined result");
+      return;
+    }
+
+    bearingState = res.state || bearingState;
+    if (res.bearingDeg == null || isNaN(res.bearingDeg)) {
+      log("[Bearing] estimator produced no valid bearing (bearingDeg=" + res.bearingDeg + ")");
+      return;
+    }
+
+    lastBearingDeg = res.bearingDeg;
+    lastBearingConf = (typeof res.confidence === "number" ? res.confidence : 0.0);
+
+    log("[Bearing] deg=" + lastBearingDeg.toFixed(1) + " conf=" + lastBearingConf.toFixed(2));
+  } catch (err) {
+    log("Bearing estimation error: " + err.message);
+  }
 }
 
 // Get Channel numbers from the web app
@@ -638,7 +769,7 @@ async function runInference(ring, idx, SR_CTX) {
       if (pDrone >= ALERT_THRESHOLD && armed) {
         log('Decision: p(drone)=' + pDrone.toFixed(3) + ' >= ' + ALERT_THRESHOLD + ' → POST /webhook/edge');
         prevAbove = true;
-        postAlert(pDrone, null); // bearing TBD
+        postAlert(pDrone, lastBearingDeg);
       } else {
         if (pDrone < releaseThresh && prevAbove) {
           log('Decision: p(drone) dropped below ' + releaseThresh.toFixed(3) + ' → re-arming');
