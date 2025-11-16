@@ -46,12 +46,21 @@ var probsTable = document.getElementById('probsTable');
 var probsTbody = probsTable ? probsTable.querySelector('tbody') : null;
 
 function log(msg) {
+  // Only show logs for detection, bearing and alert/POST related lines
+  var lower = msg.toLowerCase();
+  var keep =
+    msg.includes("Decision:") ||
+    lower.includes("alert") ||             // "Alert payload", "Alert POST", "ALERT"
+    msg.includes("/webhook/edge") ||       // POST target URL
+    lower.includes("bearing");             // bearing logs
+
+  if (!keep) return;
+
   var time = new Date().toISOString().split('T')[1].split('.')[0];
   if (logEl) {
     logEl.textContent += "[" + time + "] " + msg + "\n";
     logEl.scrollTop = logEl.scrollHeight;
   }
-  // Also mirror to console for desktop debugging
   try {
     console.log("[" + time + "] " + msg);
   } catch (_) { }
@@ -350,27 +359,83 @@ var audioCtx = null, processor = null, mediaStream = null, ortSession = null, cl
 function meanStd(a) { var n = a.length || 1, mu = 0; for (var i = 0; i < n; i++) mu += a[i]; mu /= n; var v2 = 0; for (var j = 0; j < n; j++) { var d = a[j] - mu; v2 += d * d; } return [mu, Math.sqrt(v2 / n)]; }
 
 async function init() {
-  if (inited) return;
-  log('Loading artifacts…');
-  var art = await fetch('edge_artifacts/feature_norm_and_config.json').then(function (r) { return r.json(); });
-  classes = art.classes;
-  log('classes=' + JSON.stringify(classes));
-  if (!classes || classes.indexOf(DRONE_CLASS_NAME) === -1) {
-    log('WARNING: DRONE_CLASS_NAME "' + DRONE_CLASS_NAME + '" not found in classes; alerts will not trigger.');
+  if (inited) {
+    log("[INIT] already inited → skip");
+    return;
   }
-  scalerMean = new Float32Array(art.scaler_mean);
-  scalerStd = new Float32Array(art.scaler_std);
-  setStatus('loading model…');
-  ortSession = await ort.InferenceSession.create('edge_artifacts/drone_33d_mlp.onnx', { executionProviders: ['wasm'] });
-  setStatus('ready');
-  log('Artifacts loaded');
-  inited = true;
+
+  log("[INIT] entering init()");
+
+  try {
+    // 1) feature_norm_and_config.json 가져오기
+    log("[INIT] fetching feature_norm_and_config.json …");
+    const resp = await fetch("edge_artifacts/feature_norm_and_config.json", {
+      cache: "no-store",
+    });
+
+    log("[INIT] config fetch status=" + resp.status);
+
+    if (!resp.ok) {
+      throw new Error("config fetch failed with status " + resp.status);
+    }
+
+    const art = await resp.json();
+
+    if (!art) {
+      throw new Error("config JSON is null/undefined");
+    }
+
+    classes = art.classes;
+    log("[INIT] classes=" + JSON.stringify(classes || null));
+
+    if (!Array.isArray(art.scaler_mean) || !Array.isArray(art.scaler_std)) {
+      throw new Error(
+        "scaler_mean / scaler_std missing or not arrays in config JSON"
+      );
+    }
+
+    scalerMean = new Float32Array(art.scaler_mean);
+    scalerStd = new Float32Array(art.scaler_std);
+    log(
+      "[INIT] scalerMean.len=" +
+      scalerMean.length +
+      " scalerStd.len=" +
+      scalerStd.length
+    );
+
+    setStatus("loading model…");
+    log("[INIT] creating ONNX session…");
+
+    // 2) ONNX 세션 생성
+    ortSession = await ort.InferenceSession.create(
+      "edge_artifacts/drone_33d_mlp.onnx",
+      {
+        executionProviders: ["wasm"], // 기존 값 그대로
+      }
+    );
+
+    if (!ortSession) {
+      throw new Error("ortSession is null after InferenceSession.create");
+    }
+
+    log("[INIT] ONNX session created OK");
+    setStatus("ready");
+    log("[INIT] Artifacts loaded");
+    inited = true;
+  } catch (e) {
+    // 여기서 에러를 catch 해서 로그에 남기고, 위 버튼 쪽 .catch 로 다시 던짐
+    const msg = e && e.message ? e.message : String(e);
+    log("[INIT] ERROR in init(): " + msg);
+    // rethrow so that the btn click handler's .catch() sees it
+    throw e;
+  }
 }
 
 if (btn) {
-  btn.addEventListener('click', function () {
-    log('Enable Microphone clicked');
-    setStatus('starting…');
+  btn.addEventListener("click", function () {
+    log("Enable Microphone clicked");
+    setStatus("starting…");
+
     // If geolocation doesn't update within 6s, emit guidance
     setTimeout(function () {
       if (lastLat === null || lastLon === null) {
@@ -381,17 +446,24 @@ if (btn) {
         log(" - Site-specific permission: address bar 'aA' > Website Settings > Location: Allow");
       }
     }, 6000);
-    init().then(function () {
-      startGeoWatch();
-      return startMic();
-    }).catch(function (e) {
-      geoDiagLog("init.catch");
-      log('Init/Start error: ' + e.message);
-      setStatus('error');
-    });
+
+    log("[BTN] calling init()…");
+
+    init()
+      .then(function () {
+        log("[BTN] init() resolved → starting geo + mic");
+        startGeoWatch();
+        return startMic();
+      })
+      .catch(function (e) {
+        var msg = e && e.message ? e.message : String(e);
+        geoDiagLog("init.catch");
+        log("Init/Start error: " + msg);
+        setStatus("error");
+      });
   });
 } else {
-  log('Button not found in DOM');
+  log("Button not found in DOM");
 }
 
 // Ensure the dedicated location button also triggers geolocation under a direct user gesture
@@ -538,13 +610,10 @@ async function startMic() {
       bearingBuffer.push([ch0[i], ch1[i]]);
     }
 
-    // keep only the last BEARING_MAX_SEC of samples
+    // keep only the last BEARING_MAX_SEC of samples for bearing
     if (bearingMaxSamples > 0 && bearingBuffer.length > bearingMaxSamples) {
       bearingBuffer = bearingBuffer.slice(bearingBuffer.length - bearingMaxSamples);
     }
-
-    // try bearing estimation on the latest window
-    maybeComputeBearing(SR_CTX);
   };
 
   src.connect(processor);
@@ -552,8 +621,23 @@ async function startMic() {
   setStatus('listening');
   log('Listening…');
 
-  // periodic inference
-  setInterval(function () { runInference(ring, idx, SR_CTX); }, Math.round(WIN_SEC * 1000));
+  // Start a simple, stable inference loop driven by setInterval
+  // This runs outside the audio callback to avoid overloading it.
+  if (typeof window !== "undefined") {
+    // Clear any previous timer if it exists
+    if (window._inferenceTimer) {
+      try { clearInterval(window._inferenceTimer); } catch (_) { }
+    }
+    var periodMs = Math.round(WIN_SEC * 1000); // e.g. ~800 ms
+    window._inferenceTimer = setInterval(function () {
+      try {
+        // Use the latest ring / idx / SR_CTX snapshot
+        runInference(ring, idx, SR_CTX);
+      } catch (e) {
+        log("Inference timer error: " + (e && e.message ? e.message : String(e)));
+      }
+    }, periodMs);
+  }
 }
 
 // Bearing estimation wrapper (called from audio callback)
@@ -679,30 +763,73 @@ async function debugAudioChannels() {
 
 async function runInference(ring, idx, SR_CTX) {
   try {
+    // 0) Basic guard: ONNX session not ready yet
+    if (!ortSession) {
+      log("[INF] runInference() tick but ortSession is null → skip");
+      return;
+    }
+
+    // 1) Debug: how often/what buffer?
+    log(
+      "[INF] runInference() tick: ringLen=" +
+      (ring ? ring.length : 0) +
+      " idx=" +
+      idx +
+      " SR_CTX=" +
+      SR_CTX
+    );
+
+    // ---- 기존 코드 그대로 시작 ----
     var bufCtx = new Float32Array(ring.length);
     var tail = ring.slice(idx);
-    bufCtx.set(tail, 0); bufCtx.set(ring.slice(0, idx), tail.length);
+    bufCtx.set(tail, 0);
+    bufCtx.set(ring.slice(0, idx), tail.length);
 
     var buf16 = resampleLinear(bufCtx, SR_CTX, SR_TARGET);
 
     var buf = buf16;
-    if (buf.length > N_SAMPLES_TARGET) buf = buf.slice(buf.length - N_SAMPLES_TARGET);
-    if (buf.length < N_SAMPLES_TARGET) { var x = new Float32Array(N_SAMPLES_TARGET); x.set(buf, N_SAMPLES_TARGET - buf.length); buf = x; }
+    if (buf.length > N_SAMPLES_TARGET) {
+      buf = buf.slice(buf.length - N_SAMPLES_TARGET);
+    }
+    if (buf.length < N_SAMPLES_TARGET) {
+      var x = new Float32Array(N_SAMPLES_TARGET);
+      x.set(buf, N_SAMPLES_TARGET - buf.length);
+      buf = x;
+    }
 
-    var frames = [], start = 0;
+    // debug: energy level
+    var energyRms = Math.sqrt(
+      buf.reduce(function (s, v) {
+        return s + v * v;
+      }, 0) / buf.length
+    );
+    log("[INF] buf length=" + buf.length + " RMS=" + energyRms.toFixed(6));
+
+    var frames = [],
+      start = 0;
     for (start = 0; start + N_FFT <= buf.length; start += HOP) {
       var fr = buf.slice(start, start + N_FFT);
       for (var i = 0; i < fr.length; i++) fr[i] *= windowArr[i];
       frames.push(fr);
     }
 
-    var mfccFrames = [], centroid = [], rolloff = [], flatness = [], bandwidth = [], zcrArr = [], fluxArr = [], brLowArr = [], brMidArr = [], prevSpec = null;
+    var mfccFrames = [],
+      centroid = [],
+      rolloff = [],
+      flatness = [],
+      bandwidth = [],
+      zcrArr = [],
+      fluxArr = [],
+      brLowArr = [],
+      brMidArr = [],
+      prevSpec = null;
     for (var fi = 0; fi < frames.length; fi++) {
       var fr2 = frames[fi];
       var S = powerSpectrum(fr2);
       var melE = new Float32Array(melFb.length);
       for (var m = 0; m < melFb.length; m++) melE[m] = dot(melFb[m], S);
-      for (var m2 = 0; m2 < melE.length; m2++) melE[m2] = Math.log(melE[m2] + 1e-9);
+      for (var m2 = 0; m2 < melE.length; m2++)
+        melE[m2] = Math.log(melE[m2] + 1e-9);
       mfccFrames.push(dct2(melE, 20));
 
       var c = spectralCentroid(freqs, S);
@@ -714,20 +841,36 @@ async function runInference(ring, idx, SR_CTX) {
       var brL = bandEnergyRatio(freqs, S, 0, 120);
       var brM = bandEnergyRatio(freqs, S, 150, 450);
 
-      centroid.push(c); bandwidth.push(b); rolloff.push(r); flatness.push(f);
-      zcrArr.push(z); fluxArr.push(fl); brLowArr.push(brL); brMidArr.push(brM);
+      centroid.push(c);
+      bandwidth.push(b);
+      rolloff.push(r);
+      flatness.push(f);
+      zcrArr.push(z);
+      fluxArr.push(fl);
+      brLowArr.push(brL);
+      brMidArr.push(brM);
       prevSpec = S;
     }
 
     var mfccMean = new Float32Array(20);
-    for (var k = 0; k < 20; k++) { var s = 0; for (var ii = 0; ii < mfccFrames.length; ii++) s += mfccFrames[ii][k]; mfccMean[k] = s / Math.max(1, mfccFrames.length); }
-    var energyRms = Math.sqrt(buf.reduce(function (s, v) { return s + v * v; }, 0) / buf.length);
-    var ms;
+    for (var k = 0; k < 20; k++) {
+      var s = 0;
+      for (var ii = 0; ii < mfccFrames.length; ii++) s += mfccFrames[ii][k];
+      mfccMean[k] = s / Math.max(1, mfccFrames.length);
+    }
 
-    var msCent = meanStd(centroid); var centMu = msCent[0], centStd = msCent[1];
-    var msRoll = meanStd(rolloff); var rollMu = msRoll[0], rollStd = msRoll[1];
-    var msFlat = meanStd(flatness); var flatMu = msFlat[0], flatStd = msFlat[1];
-    var msBand = meanStd(bandwidth); var bandwMu = msBand[0], bandwStd = msBand[1];
+    var msCent = meanStd(centroid);
+    var centMu = msCent[0],
+      centStd = msCent[1];
+    var msRoll = meanStd(rolloff);
+    var rollMu = msRoll[0],
+      rollStd = msRoll[1];
+    var msFlat = meanStd(flatness);
+    var flatMu = msFlat[0],
+      flatStd = msFlat[1];
+    var msBand = meanStd(bandwidth);
+    var bandwMu = msBand[0],
+      bandwStd = msBand[1];
     var fluxMu = meanStd(fluxArr)[0];
     var zcrMu = meanStd(zcrArr)[0];
     var brLowMu = meanStd(brLowArr)[0];
@@ -736,24 +879,63 @@ async function runInference(ring, idx, SR_CTX) {
     var feats = new Float32Array(33);
     for (var t = 0; t < 20; t++) feats[t] = mfccMean[t];
     feats[20] = energyRms;
-    feats[21] = centMu; feats[22] = centStd;
-    feats[23] = rollMu; feats[24] = rollStd;
-    feats[25] = flatMu; feats[26] = flatStd;
-    feats[27] = bandwMu; feats[28] = bandwStd;
-    feats[29] = fluxMu; feats[30] = zcrMu;
-    feats[31] = brLowMu; feats[32] = brMidMu;
+    feats[21] = centMu;
+    feats[22] = centStd;
+    feats[23] = rollMu;
+    feats[24] = rollStd;
+    feats[25] = flatMu;
+    feats[26] = flatStd;
+    feats[27] = bandwMu;
+    feats[28] = bandwStd;
+    feats[29] = fluxMu;
+    feats[30] = zcrMu;
+    feats[31] = brLowMu;
+    feats[32] = brMidMu;
 
     var X = new Float32Array(33);
-    for (var p = 0; p < 33; p++) { var std = scalerStd[p] || 1.0; X[p] = (feats[p] - scalerMean[p]) / std; }
+    for (var p = 0; p < 33; p++) {
+      var std = scalerStd[p] || 1.0;
+      X[p] = (feats[p] - scalerMean[p]) / std;
+    }
 
-    var input = new ort.Tensor('float32', X, [1, 33]);
+    // ---- ONNX 추론부 계측 ----
+    var input = new ort.Tensor("float32", X, [1, 33]);
+    log("[INF] calling ortSession.run …");
+
     var out = await ortSession.run({ input_0: input });
+    log("[INF] ortSession.run returned");
+
     var outName = Object.keys(out)[0];
     var logits = Array.from(out[outName].data);
+
+    // softmax
     var m = Math.max.apply(null, logits);
-    var exps = logits.map(function (v) { return Math.exp(v - m); });
-    var sum = exps.reduce(function (a, b) { return a + b; }, 0);
-    var probs = exps.map(function (v) { return v / sum; });
+    var exps = logits.map(function (v) {
+      return Math.exp(v - m);
+    });
+    var sum = exps.reduce(function (a, b) {
+      return a + b;
+    }, 0);
+    var probs = exps.map(function (v) {
+      return v / sum;
+    });
+
+    // top-3 debug
+    var paired = classes.map(function (c, i) {
+      return { c: c, p: probs[i] };
+    });
+    paired.sort(function (a, b) {
+      return b.p - a.p;
+    });
+    var top3 = paired.slice(0, 3);
+    log(
+      "[INF] top3=" +
+      top3
+        .map(function (x) {
+          return x.c + ":" + (x.p * 100).toFixed(1) + "%";
+        })
+        .join(", ")
+    );
 
     updateTable(classes, probs);
 
@@ -766,13 +948,66 @@ async function runInference(ring, idx, SR_CTX) {
       var armed = !prevAbove;
       var releaseThresh = ALERT_THRESHOLD * ALERT_RELEASE_RATIO;
 
+      log(
+        "[INF] p(drone)=" +
+        pDrone.toFixed(3) +
+        " armed=" +
+        armed +
+        " prevAbove=" +
+        prevAbove +
+        " thresh=" +
+        ALERT_THRESHOLD
+      );
+
       if (pDrone >= ALERT_THRESHOLD && armed) {
-        log('Decision: p(drone)=' + pDrone.toFixed(3) + ' >= ' + ALERT_THRESHOLD + ' → POST /webhook/edge');
+        log(
+          'Decision: p(drone)=' +
+          pDrone.toFixed(3) +
+          ' >= ' +
+          ALERT_THRESHOLD +
+          ' → compute bearing + POST /webhook/edge'
+        );
         prevAbove = true;
-        postAlert(pDrone, lastBearingDeg);
+
+        var bearingDegForAlert = null;
+        var bearingConfForAlert = 0.0;
+
+        try {
+          if (typeof window !== "undefined" && typeof window.estimateBearing === "function") {
+            var bRes = computeBearingForAlert(SR_CTX);
+            if (bRes && bRes.bearingDeg != null && !isNaN(bRes.bearingDeg)) {
+              bearingDegForAlert = bRes.bearingDeg;
+              bearingConfForAlert = (typeof bRes.confidence === "number" ? bRes.confidence : 0.0);
+              lastBearingDeg = bearingDegForAlert;
+              lastBearingConf = bearingConfForAlert;
+              log(
+                "[Bearing] ALERT bearingDeg=" +
+                bearingDegForAlert.toFixed(1) +
+                " conf=" +
+                bearingConfForAlert.toFixed(2)
+              );
+            } else {
+              log("[Bearing] ALERT bearing: estimator returned no valid bearing");
+            }
+          } else {
+            log("[Bearing] ALERT bearing: estimateBearing not available on window");
+          }
+        } catch (e) {
+          log(
+            "[Bearing] ALERT bearing error: " +
+            (e && e.message ? e.message : String(e))
+          );
+        }
+
+        postAlert(pDrone, bearingDegForAlert);
       } else {
+        // re-arm logic when probability falls back down
         if (pDrone < releaseThresh && prevAbove) {
-          log('Decision: p(drone) dropped below ' + releaseThresh.toFixed(3) + ' → re-arming');
+          log(
+            "Decision: p(drone) dropped below " +
+            releaseThresh.toFixed(3) +
+            " → re-arming"
+          );
           prevAbove = false;
         }
       }
@@ -782,23 +1017,81 @@ async function runInference(ring, idx, SR_CTX) {
   }
 }
 
+// ===== Table update helper (top-level, not nested inside runInference) =====
 function updateTable(classes, probs) {
   if (!probsTable || !probsTbody) return;
   probsTable.style.display = 'table';
   probsTbody.innerHTML = '';
-  var pairs = classes.map(function (c, i) { return { c: c, p: probs[i] }; }).sort(function (a, b) { return b.p - a.p; });
+
+  var pairs = classes
+    .map(function (c, i) {
+      return { c: c, p: probs[i] };
+    })
+    .sort(function (a, b) {
+      return b.p - a.p;
+    });
+
   for (var i = 0; i < pairs.length; i++) {
     var tr = document.createElement('tr');
-    var td0 = document.createElement('td'); td0.textContent = pairs[i].c;
-    var td1 = document.createElement('td'); td1.textContent = (pairs[i].p * 100).toFixed(1) + '%'; td1.className = 'prob';
-    tr.appendChild(td0); tr.appendChild(td1); probsTbody.appendChild(tr);
+    var td0 = document.createElement('td');
+    td0.textContent = pairs[i].c;
+    var td1 = document.createElement('td');
+    td1.textContent = (pairs[i].p * 100).toFixed(1) + '%';
+    td1.className = 'prob';
+    tr.appendChild(td0);
+    tr.appendChild(td1);
+    probsTbody.appendChild(tr);
   }
 }
 
-// Final sanity log
+// ===== Bearing helper used only when an alert actually fires =====
+function computeBearingForAlert(fs) {
+  if (!bearingBuffer || bearingBuffer.length === 0 || bearingNsamplesTarget <= 0) {
+    log(
+      "[Bearing] computeBearingForAlert: buffer empty (len=" +
+      (bearingBuffer ? bearingBuffer.length : 0) +
+      ")"
+    );
+    return null;
+  }
+
+  // Take the last BEARING_CHUNK_SEC of stereo samples
+  var startIdx = bearingBuffer.length - bearingNsamplesTarget;
+  if (startIdx < 0) startIdx = 0;
+
+  var chunk = bearingBuffer.slice(startIdx); // [nSamples][2]
+
+  var micGeometry = {
+    mic_spacing_m: 0.15,
+    heading_deg: NODE_HEADING_DEG
+  };
+
+  log(
+    "[Bearing] computeBearingForAlert: chunkLen=" +
+    chunk.length +
+    " fs=" +
+    fs
+  );
+
+  try {
+    var res = window.estimateBearing(chunk, fs, micGeometry, bearingState);
+    if (!res) {
+      log("[Bearing] computeBearingForAlert: estimator returned null/undefined");
+      return null;
+    }
+
+    bearingState = res.state || bearingState;
+    return res;
+  } catch (e) {
+    log(
+      "[Bearing] computeBearingForAlert: error " +
+      (e && e.message ? e.message : String(e))
+    );
+    return null;
+  }
+}
+
+// Final sanity log at top-level
 if (location.protocol !== 'https:') {
   log('WARNING: Page is not served over HTTPS. iOS Safari may block mic or cross-origin requests.');
 }
-
-
-
