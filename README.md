@@ -113,7 +113,6 @@ All were validated during EDTH Berlin test runs.
 - No worker-thread offload for DOA (Safari restriction)
 
 ### ML / DSP
-- No quantization  
 - No adaptive filtering  
 - No SNR-aware logic  
 - No orientation-agnostic DOA
@@ -152,13 +151,14 @@ Values are based on measured runs during EDTH Berlin.
 - Multi-node LS triangulation  
 - SQLite event storage  
 - Time-window fusion  
-- Streamlit UI  
+- Streamlit UI
+- Model Quantization (TinyML)
 
 ### Out of Scope
 - Multi-target tracking  
 - RF/vision fusion  
 - Orientation-agnostic DOA  
-- Quantization, WebGPU acceleration  
+- WebGPU acceleration  
 - Range estimation  
 - Smoothing filters (non-functional stub only)
 
