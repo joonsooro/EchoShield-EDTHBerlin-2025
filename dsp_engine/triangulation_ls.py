@@ -5,8 +5,8 @@ from typing import Optional, List
 
 import numpy as np
 
-from bearing_collect import BearingSet
-from node_output import TriangulationResult
+from .bearing_collect import BearingSet
+from .node_output import TriangulationResult
 
 
 def _bearing_deg_to_direction(bearing_deg: float) -> np.ndarray:

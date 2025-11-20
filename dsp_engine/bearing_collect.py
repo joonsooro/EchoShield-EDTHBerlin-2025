@@ -7,7 +7,7 @@ time-aligned sets for triangulation.
 from dataclasses import dataclass
 from typing import List, Dict
 import numpy as np
-from node_output import NodeDetection
+from .node_output import NodeDetection
 
 
 @dataclass
